@@ -506,12 +506,7 @@
 
         let currentUser = null;
         let db = {
-            USERS: [{id:1, nama:'Admin Sistem', username:'admin', password:'123', role:'Admin', status:'Aktif'}, {id:2, nama:'Budi Guru, S.Pd', username:'guru', password:'123', role:'Guru', status:'Aktif'}],
-            KELAS: [{id:1, nama_kelas:'X MIPA 1'}, {id:2, nama_kelas:'X MIPA 2'}],
-            SISWA: [{nis:'101', nama:'Ahmad Dhani', jk:'L', kelas:'X MIPA 1'}, {nis:'102', nama:'Bunga Citra', jk:'P', kelas:'X MIPA 1'}, {nis:'103', nama:'Cakra Khan', jk:'L', kelas:'X MIPA 2'}],
-            MAPEL: [{id:1, nama_mapel:'Matematika Wajib', guru:'Budi Guru, S.Pd', kelas:'X MIPA 1'}, {id:2, nama_mapel:'Fisika', guru:'Budi Guru, S.Pd', kelas:'X MIPA 1'}],
-            JADWAL: [{id:1, hari:'Senin', jam_mulai:'07:15', jam_selesai:'08:45', kelas:'X MIPA 1', mapel:'Matematika Wajib', guru:'Budi Guru, S.Pd'}],
-            ABSENSI: [], JURNAL: [], NILAI: [], BIMBINGAN: []
+            USERS: [], KELAS: [], SISWA: [], MAPEL: [], JADWAL: [], ABSENSI: [], JURNAL: [], NILAI: [], BIMBINGAN: []
         };
         let currentMasterConfig = null;
         let realtimeInterval = null;
@@ -526,40 +521,36 @@
         async function apiCall(action, dataObj) {
             if (!USE_MOCK_DATA && GAS_URL) {
                 try {
+                    // Penyesuaian konfigurasi fetch yang krusial untuk Apps Script
                     const response = await fetch(GAS_URL, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify({ action: action, data: dataObj })
                     });
+                    
+                    // Cek jika response status ok
+                    if(!response.ok) {
+                         throw new Error(`HTTP Error: ${response.status}`);
+                    }
+
                     const responseText = await response.text();
+                    
                     try {
                         const result = JSON.parse(responseText);
                         if (result.status === 'success') return result;
-                        else throw new Error(result.message || "Gagal mengeksekusi aksi: " + action);
+                        else throw new Error(result.message || "Server mengembalikan status error.");
                     } catch (parseError) {
-                        console.error("Respons Server bukan JSON:", responseText);
-                        throw new Error("Respons dari Google Spreadsheet tidak valid.");
+                        console.error("Gagal parsing JSON, data diterima:", responseText);
+                        throw new Error("Respons dari server bukan JSON yang valid. Pastikan pengaturan Web App GAS sudah benar.");
                     }
-                } catch (networkError) {
-                    console.error("Koneksi Error:", networkError);
-                    throw new Error(networkError.message || "Gagal terhubung ke Google Spreadsheet.");
+                } catch (error) {
+                    console.error("API Call Gagal:", error);
+                    throw new Error("Koneksi gagal: " + error.message);
                 }
+            } else {
+                 return new Promise((resolve, reject) => {
+                     reject(new Error("Aplikasi dalam mode Offline. Silakan atur URL GAS_URL."));
+                 });
             }
-            return new Promise((resolve, reject) => {
-                setTimeout(() => {
-                    if(action === 'login') {
-                        const u = db.USERS.find(x => x.username === dataObj.username && x.password === dataObj.password);
-                        if(u) resolve({status: 'success', data: Object.assign({}, u, {password: null})});
-                        else reject(new Error("Username/Password salah"));
-                    } else if(action === 'get_data') resolve({status: 'success', data: db[dataObj.sheetName] || []});
-                    else if(action === 'save_absensi' || action === 'save_nilai') {
-                        const sh = action === 'save_absensi' ? 'ABSENSI' : 'NILAI';
-                        dataObj.forEach(item => db[sh].push(item)); resolve({status: 'success'});
-                    } else if(action === 'insert_data') {
-                        dataObj.row.id = Date.now(); db[dataObj.sheetName].push(dataObj.row); resolve({status:'success', data: dataObj.row});
-                    } else resolve({status: 'success'});
-                }, 300); 
-            });
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -580,7 +571,7 @@
                         sessionStorage.setItem('siguru_user', JSON.stringify(res.data)); currentUser = res.data;
                         document.getElementById('login-form').reset(); initApp();
                     }
-                } catch(err) { Swal.fire('Error', err.message, 'error'); }
+                } catch(err) { Swal.fire('Login Gagal', err.message, 'error'); }
                 hideLoader();
             };
 
@@ -609,13 +600,29 @@
 
             if(currentUser.role === 'Admin') document.querySelectorAll('.admin-only').forEach(el => el.classList.remove('hidden'));
 
-            await refreshDbData(['KELAS', 'MAPEL', 'SISWA']);
-            populateSelects();
-            startRealtimeClock();
-            switchView('dashboard');
+            showLoader('Mengambil data dari Spreadsheet...');
+            try {
+                await refreshDbData(['KELAS', 'MAPEL', 'SISWA']);
+                populateSelects();
+                startRealtimeClock();
+                switchView('dashboard');
+            } catch(e) {
+                 Swal.fire('Peringatan', 'Gagal memuat beberapa data. ' + e.message, 'warning');
+            }
+            hideLoader();
         }
 
-        async function refreshDbData(sheets) { for(let s of sheets) { const r = await apiCall('get_data', {sheetName: s}); db[s] = r.data; } }
+        async function refreshDbData(sheets) { 
+            for(let s of sheets) { 
+                try {
+                    const r = await apiCall('get_data', {sheetName: s}); 
+                    db[s] = r.data || []; 
+                } catch (e) {
+                    console.error(`Gagal mengambil sheet ${s}:`, e);
+                    db[s] = []; // Fallback agar tidak crash jika salah satu sheet kosong
+                }
+            } 
+        }
 
         function switchView(viewId) {
             safeRemoveClass('.view-section', 'hidden'); 
@@ -666,7 +673,9 @@
         async function loadDashboard() {
             document.getElementById('stat-siswa').innerText = db.SISWA.length;
             document.getElementById('stat-kelas').innerText = db.KELAS.length;
-            await refreshDbData(['JURNAL', 'JADWAL']);
+            try {
+                await refreshDbData(['JURNAL', 'JADWAL']);
+            } catch(e) {}
             document.getElementById('stat-jurnal').innerText = db.JURNAL.length;
         }
 
@@ -692,8 +701,18 @@
             });
             if(isC) return;
             
-            db.JADWAL.push({ id: Date.now(), hari: h, jam_mulai: jm, jam_selesai: js, kelas: k, mapel: m, guru: g });
-            closeModal('modal-jadwal'); loadJadwal();
+            const newJadwal = { hari: h, jam_mulai: jm, jam_selesai: js, kelas: k, mapel: m, guru: g };
+            showLoader();
+            try {
+                await apiCall('insert_data', { sheetName: 'JADWAL', row: newJadwal });
+                closeModal('modal-jadwal'); 
+                await refreshDbData(['JADWAL']);
+                loadJadwal();
+                Swal.fire('Sukses', 'Jadwal ditambahkan', 'success');
+            } catch(err) {
+                 Swal.fire('Error', err.message, 'error');
+            }
+            hideLoader();
         };
 
         function loadJadwal() {
@@ -726,12 +745,32 @@
                 else { r.classList.remove('bg-green-50','border-l-4','border-green-500','opacity-60'); sc.innerHTML='<span class="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs">Menunggu</span>'; }
             });
         }
-        function hapusJadwal(id) { if(confirm('Hapus jadwal?')) { db.JADWAL = db.JADWAL.filter(j => j.id !== id); loadJadwal(); } }
+        
+        async function hapusJadwal(id) { 
+            if(confirm('Hapus jadwal?')) { 
+                showLoader();
+                try {
+                    await apiCall('delete_data', { sheetName: 'JADWAL', id: id });
+                    await refreshDbData(['JADWAL']);
+                    loadJadwal();
+                } catch(e) {
+                    Swal.fire('Error', e.message, 'error');
+                }
+                hideLoader();
+            } 
+        }
 
         // --- ABSENSI ---
         async function loadAbsensiForm() {
             const tgl = document.getElementById('absensi-tanggal').value, kls = document.getElementById('absensi-kelas').value;
             if(!tgl || !kls) return Swal.fire('Perhatian', 'Pilih tanggal dan kelas', 'warning');
+            
+            showLoader();
+            try {
+                await refreshDbData(['ABSENSI']);
+            } catch(e) {}
+            hideLoader();
+
             const sK = db.SISWA.filter(s => s.kelas === kls);
             document.querySelector('#table-input-absensi tbody').innerHTML = sK.map(s => {
                 const cS = (db.ABSENSI.find(a => a.tanggal === tgl && a.siswa === s.nis) || {}).status || '';
@@ -747,7 +786,14 @@
             let d = [], v = true;
             document.querySelectorAll('.abs-sel').forEach(s => { if(!s.value) v = false; d.push({tanggal: t, kelas: k, siswa: s.getAttribute('data-nis'), status: s.value}); });
             if(!v) return Swal.fire('Perhatian', 'Isi semua status kehadiran siswa terlebih dahulu.', 'warning');
-            showLoader(); await apiCall('save_absensi', d); hideLoader(); Swal.fire('Berhasil','Absen tersimpan','success');
+            showLoader(); 
+            try {
+                await apiCall('save_absensi', d); 
+                Swal.fire('Berhasil','Absen tersimpan','success');
+            } catch (e) {
+                Swal.fire('Error', e.message, 'error');
+            }
+            hideLoader(); 
         }
 
         // ==============================================================
@@ -822,13 +868,30 @@
         document.getElementById('form-jurnal').onsubmit = async (e) => {
             e.preventDefault();
             const d = { tanggal: document.getElementById('j-tanggal').value, kelas: document.getElementById('j-kelas').value, mapel: document.getElementById('j-mapel').value, jam: document.getElementById('j-jam').value, materi: document.getElementById('j-materi').value, kegiatan: document.getElementById('j-kegiatan').value };
-            showLoader(); await apiCall('insert_data', {sheetName: 'JURNAL', row: d}); closeModal('modal-jurnal'); loadJurnal(); hideLoader(); Swal.fire('Sukses', 'Jurnal ditambahkan', 'success');
+            showLoader(); 
+            try {
+                await apiCall('insert_data', {sheetName: 'JURNAL', row: d}); 
+                closeModal('modal-jurnal'); 
+                await refreshDbData(['JURNAL']);
+                loadJurnal(); 
+                Swal.fire('Sukses', 'Jurnal ditambahkan', 'success');
+            } catch(e) {
+                 Swal.fire('Error', e.message, 'error');
+            }
+            hideLoader(); 
         };
 
         // --- NILAI ---
         async function loadNilaiSiswa() {
             const kls = document.getElementById('nilai-kelas').value, mapel = document.getElementById('nilai-mapel').value;
             if(!kls || !mapel) return Swal.fire('Perhatian', 'Pilih kelas dan mapel', 'warning');
+            
+            showLoader();
+            try {
+                 await refreshDbData(['NILAI']);
+            } catch(e) {}
+            hideLoader();
+
             document.querySelector('#table-input-nilai tbody').innerHTML = db.SISWA.filter(s => s.kelas === kls).map(s => {
                 const n = db.NILAI.find(x => x.siswa === s.nis && x.mapel === mapel) || {tugas1:'', tugas2:'', tugas3:'', tugas4:'', tugas5:'', uts:'', uas:'', nilai_akhir:'', grade:''};
                 return `<tr data-nis="${s.nis}"><td class="font-medium">${s.nama}</td>
@@ -848,6 +911,35 @@
             if(cT>0 || uts>0 || uas>0) { a = Math.round((rT*0.3)+(uts*0.3)+(uas*0.4)); g = a>=90?'A':a>=80?'B':a>=70?'C':a>=60?'D':'E'; }
             tr.querySelector('.v-akh').innerText = a; tr.querySelector('.v-grd').innerText = g;
         }
+
+        async function simpanNilai() {
+            const mapel = document.getElementById('nilai-mapel').value;
+            const rows = document.querySelectorAll('#table-input-nilai tbody tr');
+            let dataToSave = [];
+
+            rows.forEach(tr => {
+                const getVal = (j) => tr.querySelector(`[data-j="${j}"]`).value;
+                dataToSave.push({
+                    siswa: tr.getAttribute('data-nis'),
+                    mapel: mapel,
+                    tugas1: getVal('tugas1'), tugas2: getVal('tugas2'), tugas3: getVal('tugas3'),
+                    tugas4: getVal('tugas4'), tugas5: getVal('tugas5'),
+                    uts: getVal('uts'), uas: getVal('uas'),
+                    nilai_akhir: tr.querySelector('.v-akh').innerText,
+                    grade: tr.querySelector('.v-grd').innerText
+                });
+            });
+
+            showLoader('Menyimpan Nilai...');
+            try {
+                await apiCall('save_nilai', dataToSave);
+                Swal.fire('Berhasil', 'Data Nilai tersimpan', 'success');
+            } catch(e) {
+                Swal.fire('Error', e.message, 'error');
+            }
+            hideLoader();
+        }
+
 
         // --- MASTER DATA ---
         function loadMasterView(target) {
@@ -876,12 +968,35 @@
             e.preventDefault(); const idx = document.getElementById('form-master').getAttribute('data-idx'); let nR = {};
             currentMasterConfig.c.forEach(c => { if(c!=='id') nR[c] = document.getElementById(`mf-${c}`).value; });
             showLoader();
-            if(idx !== '') { db[currentMasterConfig.s][idx] = Object.assign(db[currentMasterConfig.s][idx], nR); } 
-            else { nR.id = Date.now(); db[currentMasterConfig.s].push(nR); }
-            renderMasterTable(); populateSelects(); closeModal('modal-master'); hideLoader(); Swal.fire('Sukses', 'Tersimpan', 'success');
+            try {
+                if(idx !== '') { 
+                    nR.id = db[currentMasterConfig.s][idx].id;
+                    await apiCall('update_data', { sheetName: currentMasterConfig.s, id: nR.id, row: nR });
+                } 
+                else { 
+                    await apiCall('insert_data', { sheetName: currentMasterConfig.s, row: nR });
+                }
+                await refreshDbData([currentMasterConfig.s]);
+                renderMasterTable(); populateSelects(); closeModal('modal-master'); 
+                Swal.fire('Sukses', 'Tersimpan', 'success');
+            } catch (err) {
+                 Swal.fire('Error', err.message, 'error');
+            }
+            hideLoader();
         };
         async function deleteMaster(i) {
-            if(confirm('Hapus data ini?')) { db[currentMasterConfig.s].splice(i, 1); renderMasterTable(); populateSelects(); }
+            if(confirm('Hapus data ini?')) { 
+                const idToDelete = db[currentMasterConfig.s][i].id;
+                showLoader();
+                try {
+                    await apiCall('delete_data', { sheetName: currentMasterConfig.s, id: idToDelete });
+                    await refreshDbData([currentMasterConfig.s]);
+                    renderMasterTable(); populateSelects(); 
+                } catch(err) {
+                    Swal.fire('Error', err.message, 'error');
+                }
+                hideLoader();
+            }
         }
 
     </script>
